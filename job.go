@@ -1,4 +1,4 @@
-package main
+package jobsui
 
 type Job struct {
 	Name string
