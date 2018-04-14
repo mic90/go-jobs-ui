@@ -2,34 +2,39 @@ package jobsui
 
 import (
 	"fmt"
-	"github.com/marcusolsson/tui-go"
 	"log"
 	"strings"
+
+	tui "github.com/marcusolsson/tui-go"
 )
 
-type Ui struct {
-	Jobs map[string]*Job
-	JobsWidgets map[string]*tui.Label
-	JobWidget *tui.Box
-	Theme *tui.Theme
-	UiInternal tui.UI
-	Progress uint8
-	ProgressWidget *tui.Progress
-	StatusBar *tui.StatusBar
+// UI is a base struct for the interface
+type UI struct {
+	Jobs            map[string]*Job
+	JobsWidgets     map[string]*tui.Label
+	JobWidget       *tui.Box
+	Theme           *tui.Theme
+	UIInternal      tui.UI
+	ProgressWidget  *tui.Progress
+	StatusBarWidget *tui.StatusBar
+	JobsDone        int
+	ScrollPos       *int
 }
 
-func NewUi() *Ui {
+// NewUI creates new interface with empty jobs list
+// The ui event loop is started immediately in a seperate gorotuine
+func NewUI() *UI {
 	// prepare theme
 	theme := tui.NewTheme()
 	normalStyle := tui.Style{Bg: tui.ColorBlack, Fg: tui.ColorWhite}
 	disabledStyle := tui.Style{Bg: tui.ColorBlack, Fg: tui.ColorWhite, Underline: tui.DecorationOn}
 	activeStyle := tui.Style{Bg: tui.ColorBlack, Fg: tui.ColorCyan}
 	doneStyle := tui.Style{Bg: tui.ColorBlack, Fg: tui.ColorGreen}
-	errorStyle := tui.Style{Bg: tui.ColorBlack, Fg: tui.ColorRed}
+	failedStyle := tui.Style{Bg: tui.ColorBlack, Fg: tui.ColorRed}
 	theme.SetStyle("label.normal", normalStyle)
 	theme.SetStyle("label.active", activeStyle)
 	theme.SetStyle("label.done", doneStyle)
-	theme.SetStyle("label.error", errorStyle)
+	theme.SetStyle("label.failed", failedStyle)
 	theme.SetStyle("label.disabled", disabledStyle)
 
 	// prepare ui with progress bar, list of jobs and status bar
@@ -45,7 +50,7 @@ func NewUi() *Ui {
 	jobsWidget.SetSizePolicy(tui.Expanding, tui.Expanding)
 
 	statusBar := tui.NewStatusBar("")
-	statusBar.SetPermanentText("Progress: 0%")
+	statusBar.SetPermanentText("Progress: 0 %")
 
 	root := tui.NewVBox(progressBar, jobsWidget, statusBar)
 	ui, err := tui.New(root)
@@ -53,19 +58,23 @@ func NewUi() *Ui {
 		log.Fatal(err)
 	}
 
+	scrollPos := new(int)
+	*scrollPos = 0
+
 	ui.SetTheme(theme)
-	ui.SetKeybinding("Esc", func() { ui.Quit() })
 	ui.SetKeybinding("Up", func() {
-		scrollArea.Scroll(0, -1)
+		if *scrollPos > 0 {
+			scrollArea.Scroll(0, -1)
+			*scrollPos--
+		}
 	})
 	ui.SetKeybinding("Down", func() {
 		scrollArea.Scroll(0, 1)
+		*scrollPos++
 	})
 	ui.SetKeybinding("t", func() {
 		scrollArea.ScrollToTop()
-	})
-	ui.SetKeybinding("b", func() {
-		scrollArea.ScrollToBottom()
+		*scrollPos = 0
 	})
 
 	jobs := make(map[string]*Job)
@@ -77,29 +86,39 @@ func NewUi() *Ui {
 		}
 	}()
 
-	return &Ui{jobs,jobsWidgets,  jobsList, theme, ui, 0, progressBar, statusBar}
+	return &UI{jobs, jobsWidgets, jobsList, theme, ui, progressBar, statusBar, 0, scrollPos}
 }
 
-func (ui *Ui) AddJob(name, description string) {
+// AddJob adds job to the ui list with given name and description
+// The name is used only internally for lookup operations
+// The description is what will be visible in the ui
+func (ui *UI) AddJob(name, description string) {
 	newJob := NewJob(name, description)
 	ui.Jobs[name] = newJob
-	jobWidgetText := fmt.Sprintf("[%8s] %s", "", description)
+	jobWidgetText := prepareJobDescription("", description)
 	newJobWidget := tui.NewLabel(jobWidgetText)
 	newJobWidget.SetStyleName("normal")
 	ui.JobsWidgets[name] = newJobWidget
 	ui.JobWidget.Append(newJobWidget)
 }
 
-func (ui *Ui) SetJobDisabled(name string) error {
+// SetJobDisabled sets given job state to disabled.
+// Disabled job will have its status changed in the ui to [DISABLED]
+// The stylesheet will be changed to underline white on black text
+func (ui *UI) SetJobDisabled(name string) error {
 	_, found := ui.Jobs[name]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", name)
 	}
 	ui.updateJob(name, "disabled")
+	ui.increaseProgress()
 	return nil
 }
 
-func (ui *Ui) SetJobErrorText(name, newText string) error {
+// SetJobFailedText sets given job state to failed and changes its description to the newText value
+// Failed jobs will have its status changed in the ui to [FAILED]
+// The stylesheet will be changed to red on black text
+func (ui *UI) SetJobFailedText(name, newText string) error {
 	job, found := ui.Jobs[name]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", name)
@@ -112,11 +131,15 @@ func (ui *Ui) SetJobErrorText(name, newText string) error {
 	return nil
 }
 
-func (ui *Ui) SetJobError(name string) error {
-	return ui.SetJobErrorText(name, "")
+// SetJobFailed sets given job state to failed.
+func (ui *UI) SetJobFailed(name string) error {
+	return ui.SetJobFailedText(name, "")
 }
 
-func (ui *Ui) SetJobDoneText(name, newText string) error {
+// SetJobDoneText sets given job state to done and changes its description to the newText value
+// Done jobs will have its status changed in the ui to [DONE]
+// The stylesheet will be changed to green on black text
+func (ui *UI) SetJobDoneText(name, newText string) error {
 	job, found := ui.Jobs[name]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", name)
@@ -125,15 +148,20 @@ func (ui *Ui) SetJobDoneText(name, newText string) error {
 		job.Description = newText
 	}
 	job.Done = true
-	ui.updateJob(name,  "done")
+	ui.updateJob(name, "done")
+	ui.increaseProgress()
 	return nil
 }
 
-func (ui *Ui) SetJobDone(name string) error {
+// SetJobDone sets given job state to done.
+func (ui *UI) SetJobDone(name string) error {
 	return ui.SetJobDoneText(name, "")
 }
 
-func (ui *Ui) SetJobActive(name string) error {
+// SetJobActive sets given job state to active
+// Active jobs will have its status changed in the ui to [ACTIVE]
+// The stylesheet will be changed to cyan on balck text
+func (ui *UI) SetJobActive(name string) error {
 	job, found := ui.Jobs[name]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", name)
@@ -144,20 +172,24 @@ func (ui *Ui) SetJobActive(name string) error {
 	return nil
 }
 
-func (ui *Ui) setProgress(progress int) {
-	ui.UiInternal.Update(func() {
+// SetProgress sets progress of the whole operation to given value
+// The value must be betweeon 0 and 100
+// This will update the progress bar value and status bar text
+func (ui *UI) SetProgress(progress int) {
+	ui.UIInternal.Update(func() {
 		ui.ProgressWidget.SetCurrent(progress)
-		ui.StatusBar.SetPermanentText(fmt.Sprintf("Progress: %d", progress))
+		ui.StatusBarWidget.SetPermanentText(prepareProgressText(progress))
 	})
 }
 
-func (ui *Ui) setStatus(statusText string) {
-	ui.UiInternal.Update(func() {
-		ui.StatusBar.SetText(statusText)
+// SetStatus sets temporary status bra text
+func (ui *UI) SetStatus(statusText string) {
+	ui.UIInternal.Update(func() {
+		ui.StatusBarWidget.SetText(statusText)
 	})
 }
 
-func (ui *Ui) updateJob(jobName, styleName string) error {
+func (ui *UI) updateJob(jobName, styleName string) error {
 	job, found := ui.Jobs[jobName]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", jobName)
@@ -167,10 +199,29 @@ func (ui *Ui) updateJob(jobName, styleName string) error {
 	if found == false {
 		return fmt.Errorf("couldn't find job widget named %s", jobName)
 	}
-	jobWidgetText := fmt.Sprintf("[%8s] %s", strings.ToUpper(styleName), job.Description)
-	ui.UiInternal.Update(func() {
+	jobWidgetText := prepareJobDescription(styleName, job.Description)
+	ui.UIInternal.Update(func() {
 		jobWidget.SetText(jobWidgetText)
 		jobWidget.SetStyleName(styleName)
 	})
 	return nil
+}
+
+func (ui *UI) increaseProgress() {
+	jobsCount := len(ui.Jobs)
+	ui.JobsDone++
+	if ui.JobsDone == jobsCount {
+		ui.SetProgress(100)
+	} else {
+		progressValue := 100 / jobsCount * ui.JobsDone
+		ui.SetProgress(progressValue)
+	}
+}
+
+func prepareJobDescription(status, text string) string {
+	return fmt.Sprintf("[%8s] %s", strings.ToUpper(status), text)
+}
+
+func prepareProgressText(value int) string {
+	return fmt.Sprintf("Progress: %d %%", value)
 }
