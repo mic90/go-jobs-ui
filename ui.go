@@ -115,19 +115,19 @@ func (ui *UI) SetJobDisabled(name string) error {
 	return nil
 }
 
-// SetJobFailedText sets given job state to failed and changes its description to the newText value
+// SetJobFailedText sets given job state to failed and adds message to the current description with format [description]:[message]
 // Failed jobs will have its status changed in the ui to [FAILED]
 // The stylesheet will be changed to red on black text
-func (ui *UI) SetJobFailedText(name, newText string) error {
+func (ui *UI) SetJobFailedText(name, message string) error {
 	job, found := ui.Jobs[name]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", name)
 	}
-	if newText != "" {
-		job.Description = newText
+	if message != "" {
+		job.Description = fmt.Sprintf("%s : %s", job.Description, message)
 	}
 	job.Error = true
-	ui.updateJob(name, "error")
+	ui.updateJob(name, "failed")
 	return nil
 }
 
@@ -136,16 +136,16 @@ func (ui *UI) SetJobFailed(name string) error {
 	return ui.SetJobFailedText(name, "")
 }
 
-// SetJobDoneText sets given job state to done and changes its description to the newText value
+// SetJobDoneText sets given job state to done and adds message to the current description with format [description]:[message]
 // Done jobs will have its status changed in the ui to [DONE]
 // The stylesheet will be changed to green on black text
-func (ui *UI) SetJobDoneText(name, newText string) error {
+func (ui *UI) SetJobDoneText(name, message string) error {
 	job, found := ui.Jobs[name]
 	if found == false {
 		return fmt.Errorf("couldn't find job named %s", name)
 	}
-	if newText != "" {
-		job.Description = newText
+	if message != "" {
+		job.Description = fmt.Sprintf("%s : %s", job.Description, message)
 	}
 	job.Done = true
 	ui.updateJob(name, "done")
